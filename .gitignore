@@ -1,0 +1,45 @@
+# Logs
+logs/
+
+# Model checkpoints (large)
+model/
+
+# Output (generated during training/eval)
+output/
+
+# Data (downloaded separately)
+data/
+data
+
+# Pretrained weights (downloaded separately)
+ckpt/
+ckpt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+*.so
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Env
+.env
+*.log
+nohup.out

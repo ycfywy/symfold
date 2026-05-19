@@ -1,0 +1,62 @@
+{
+  "task_name": "260518-161300-v2-train",
+  "seed": 2026,
+  "device": "cuda:0",
+  "version": "v2",
+  "model": {
+    "hidden_dim": 192,
+    "num_heads": 4,
+    "dim_head": 48,
+    "num_layers_enc": 3,
+    "num_layers_mid": 2,
+    "num_layers_dec": 3,
+    "patch_size": 4,
+    "cond_dim": 8,
+    "max_len": 640,
+    "dp_rate": 0.1,
+    "rho_0": 0.005,
+    "pos_weight_scale": 1.0,
+    "u_conditioner_ckpt": "ufold_train_alldata.pt",
+    "num_families": 0,
+    "local_bias_layers": 2,
+    "local_window": 8,
+    "project_mode": "relaxed",
+    "max_pairs_per_row": 2
+  },
+  "training": {
+    "epochs": 80,
+    "lr": 0.0001,
+    "warmup_epochs": 3,
+    "eval_every": 2,
+    "save_every": 5,
+    "save_every_step": 500,
+    "patience": 15,
+    "num_workers": 0,
+    "dataset": "all",
+    "bucket_batch_size": {
+      "80": 64,
+      "160": 32,
+      "240": 16,
+      "320": 8,
+      "400": 6,
+      "480": 4,
+      "560": 3,
+      "640": 2
+    }
+  },
+  "sampling": {
+    "num_steps": 20,
+    "num_samples_per_input": 1,
+    "physics_beta": 0.0,
+    "physics_lambda_pk": 0.0,
+    "physics_alpha_stack": 1.0,
+    "project_mode": "relaxed"
+  },
+  "paths": {
+    "preprocess_root": "data/preprocess",
+    "val_root": "data/bpRNA/VL0.cPickle",
+    "model_dir": "model",
+    "log_dir": "logs",
+    "output_dir": "output"
+  }
+}
