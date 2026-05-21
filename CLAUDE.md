@@ -11,7 +11,7 @@ SymFold 是一个基于 **Discrete Flow Matching** 的 RNA 二级结构预测模
 /root/aigame/dannyyan/RNADiffFold/symfold/
 ```
 
-它是 RNADiffFold 的改进版本，使用 Bernoulli Flow Matching + Symmetry-Equivariant Axial DiT 架构。
+它是 RNADiffFold 的改进版本。当前活跃版本为 **v3**，使用 **Dilated Axial SE-DiT (DA-SE-DiT)** 架构 + Bernoulli Flow Matching + Physics-Aware Loss。
 
 ---
 
@@ -83,14 +83,18 @@ src/
 ├── common/              # 公共工具 (data_utils, loss_utils)
 ├── datasets/            # 数据加载 (data_generator, _CompatUnpickler)
 ├── models/              # 条件编码器 (RNA-FM, UFold)
-├── v1/                  # ★ v1 版本模型代码
+├── v1/                  # v1 版本模型代码 (baseline)
 │   ├── model.py         #   SymFoldModel
 │   ├── se_dit.py        #   SEDiT backbone (6层 flat)
 │   └── discrete_flow.py #   Greedy max-matching
-└── v2/                  # ★ v2 版本模型代码
-    ├── model.py         #   SymFoldModel_v2
-    ├── ms_se_dit.py     #   MSEDiT backbone (3+2+3 U型)
-    └── discrete_flow.py #   Relaxed projection + Cosine schedule
+├── v2/                  # v2 版本模型代码 (已废弃)
+│   ├── model.py         #   SymFoldModel_v2
+│   ├── ms_se_dit.py     #   MSEDiT backbone (3+2+3 U型)
+│   └── discrete_flow.py #   Relaxed projection + Cosine schedule
+└── v3/                  # ★ v3 版本模型代码 (当前活跃)
+    ├── model.py         #   SymFoldModel_v3
+    ├── da_se_dit.py     #   DA-SE-DiT backbone (9层, dilated axial)
+    └── discrete_flow.py #   Strict projection + Physics loss
 ```
 
 **规则**：
@@ -123,16 +127,18 @@ cd /root/aigame/dannyyan/RNADiffFold/symfold
 source /root/aigame/dannyyan/miniconda3/bin/activate RNADiffFold_torch260
 
 # 命名规范: YYMMDD-HHMMSS-任务名
-# 例如: 260519-132200-v2-fresh
+# 例如: 260520-v3-train
 
-# v1 训练
+# v3 训练 (当前活跃版本)
+bash scripts/run_train_v3.sh
+# 或手动:
+nohup python -u train/train_v3.py train/config/train_config_v3.json >> logs/260520-v3-train/260520-v3-train.stdout.log 2>> logs/260520-v3-train/260520-v3-train.stderr.log &
+
+# v1 训练 (baseline)
 nohup python -u train/train.py train/config/train_config.json >> logs/<task>.stdout.log 2>> logs/<task>.stderr.log &
 
-# v2 全新训练 (auto_resume=false, batch翻倍, vis_samples=10)
-nohup python -u train/train_v2.py train/config/train_config_v2_fresh.json >> logs/260519-132200-v2-fresh.stdout.log 2>> logs/260519-132200-v2-fresh.stderr.log &
-
-# v2 恢复训练 (auto_resume=true, 从 last.pt 恢复)
-nohup python -u train/train_v2.py train/config/train_config_v2.json >> logs/<task>.stdout.log 2>> logs/<task>.stderr.log &
+# v2 (已废弃)
+# nohup python -u train/train_v2.py train/config/train_config_v2_fresh.json >> logs/<task>.stdout.log 2>> logs/<task>.stderr.log &
 ```
 
 ### GPU 监控 (后台持续运行)
@@ -274,49 +280,56 @@ tail -5 logs/260519-185500-v2-eval.log
 
 ## 当前状态
 
-- **v1**: 训练完成，best.pt 在 `model/260514-full-train-symfold/best.pt`
-- **v2 (旧)**: 已废弃，配置在 `train/config/train_config_v2.json`，模型在 `model/260518-161300-v2-train/`
-- **v2 (全新)**: ★ 正在训练中，从零开始
-  - 配置: `train/config/train_config_v2_fresh.json`
-  - 任务名: `260519-132200-v2-fresh`
-  - 模型目录: `model/260519-132200-v2-fresh/`
-  - 输出目录: `output/260519-132200-v2-fresh/`
-  - 日志: `logs/260519-132200-v2-fresh.log`
-  - 特点: batch翻倍, auto_resume=false, vis_samples=10, 只保留 last.pt + best.pt
-  - 可视化: 按 RNA 名字建子文件夹 (`output/260519-132200-v2-fresh/vis/<rna_name>/epoch_XX.png`)
-  - GPU监控: 后台运行 `scripts/gpu_monitor.py`，图在 `output/260519-132200-v2-fresh/gpu_monitor_live.png`
-  - 进度: epoch 3/80 (截至 2026-05-19 14:14)
+### v3 (当前活跃) — 训练中
 
-### 恢复/继续训练 v2-fresh 的步骤
+- **配置**: `train/config/train_config_v3.json`
+- **任务名**: `260520-v3-train`
+- **模型目录**: `model/260520-v3-train/`
+- **输出目录**: `output/260520-v3-train/`
+- **日志**: `logs/260520-v3-train/`
+- **状态**: 训练到 epoch 56/80 时进程被 SIGTERM 中断，已开启 auto_resume=true 恢复训练
+- **Resume 说明**: last.pt 保存了 epoch 56 中间步的模型和 optimizer；history 从磁盘 `output/260520-v3-train/history.json` 恢复（56 entries），曲线和可视化会延续
+- **训练时长**: ~18 小时 (56 epochs × ~18min/epoch)
 
-1. 先确认训练进程是否还在运行:
-```bash
-ps aux | grep train_v2 | grep -v grep
-```
+#### v3 架构要点
+- **Backbone**: DA-SE-DiT (Dilated Axial SE-DiT)，9 层 flat (无 U-Net)
+- **Dilation pattern**: [1,1,1, 2,2,2, 4,4,4]，交替扩张率增强长程依赖
+- **Hidden dim**: 256, 4 heads, dim_head=64, patch_size=4
+- **Loss**: BCE + Physics-Aware (stacking weight=0.05, non-crossing weight=0.02)
+- **投影**: Strict greedy max-matching (回归 v1 方案)
+- **参数量**: Backbone 13.2M, 可训练 21.8M, 冻结 RNA-FM 99.5M
+- **训练**: lr=8e-5, warmup=5 epochs, eval_every=2, patience=20, grad_clip=1.0
 
-2. 如果进程已死，直接重启（会自动从 last.pt 恢复）:
-```bash
-cd /root/aigame/dannyyan/RNADiffFold/symfold
-source /root/aigame/dannyyan/miniconda3/bin/activate RNADiffFold_torch260
+#### v3 训练曲线摘要
 
-# 注意: 需要先将配置中 auto_resume 改为 true
-# 编辑 train/config/train_config_v2_fresh.json，将 "auto_resume": false 改为 true
+| Epoch | Train Loss | Val F1 | Val Precision | Val Recall | 趋势 |
+|:-----:|:----------:|:------:|:-------------:|:----------:|:----:|
+| 1 | 0.0441 | 0.432 | 0.340 | 0.648 | 起步 |
+| 7 | 0.0170 | 0.485 | 0.395 | 0.688 | 稳步上升 |
+| 19 | 0.0105 | 0.511 | 0.423 | 0.703 | ↑ |
+| 33 | 0.0072 | 0.542 | 0.455 | 0.721 | ↑ |
+| 45 | 0.0059 | 0.564 | 0.483 | 0.727 | ↑ |
+| 55 | 0.0049 | **0.575** | 0.497 | 0.730 | ↑ 仍在上升 |
 
-nohup python -u train/train_v2.py train/config/train_config_v2_fresh.json >> logs/260519-132200-v2-fresh.stdout.log 2>> logs/260519-132200-v2-fresh.stderr.log &
-```
+**分析**: v3 训练稳定，val F1 持续单调上升（无崩塌），Precision 和 Recall 同步改善。best.pt 对应最后一个 eval (epoch 55, F1=0.575)。但目前 val F1 仍低于 v1 (0.644 on bpRNA)，还有 24 epochs 训练空间，且曲线未出现 plateau 迹象。
 
-3. 确认 GPU 监控也在运行:
-```bash
-ps aux | grep gpu_monitor | grep -v grep
-# 如果没有运行，重新启动:
-nohup python scripts/gpu_monitor.py --output output/260519-132200-v2-fresh --interval 10 --plot_every 30 >> logs/260519-gpu-monitor.log 2>&1 &
-```
+#### v3 已保存 Checkpoints
 
-4. 验证训练正常:
-```bash
-tail -5 logs/260519-132200-v2-fresh.log
-cat logs/260519-132200-v2-fresh.heartbeat
-```
+每 5 个 epoch 保存一次: epoch_4, 9, 14, ..., 54 + best.pt + last.pt，共 ~6GB
+
+---
+
+### v1 (baseline) — 训练完成
+
+- **模型**: `model/260514-full-train-symfold/best.pt`
+- **架构**: SEDiT (6 层 flat, patch=4, greedy projection)
+- **参数量**: ~13M
+
+### v2 (已废弃)
+
+- **v2 (旧)**: 配置在 `train/config/train_config_v2.json`，模型在 `model/260518-161300-v2-train/`
+- **v2 (fresh)**: ❌ 训练完成但失败（early stop @ epoch 31，val F1 从 0.296 持续崩塌到 0.141）
+  - 失败原因: Relaxed projection 训练-推理不一致 + batch 过大导致有效训练步数不足 + U-Net 下采样破坏对称等变性
 
 ### v1 评估结果 (baseline)
 
@@ -327,9 +340,12 @@ cat logs/260519-132200-v2-fresh.heartbeat
 | bpRNA | 0.644 | 0.583 | 0.758 |
 | PDB_TS_hard | 0.596 | 0.695 | 0.540 |
 
-### v2 改进点
+### v3 改进点 (相比 v1)
 
-1. Multi-Scale Axial DiT (U型 3+2+3 blocks，增强长程依赖)
-2. Relaxed Projection (每行≤2 配对，支持 pseudoknot)
-3. Adaptive Cosine Sampling Schedule (前大后小步长)
-4. Local Attention Bias (前 2 层加短程 bias)
+1. **Dilated Axial Attention** — 交替 dilation=1/2/4，不降分辨率即可捕获 2×/4× 长程依赖
+2. **Cross-Resolution Attention** — 每 3 层插入全局压缩 attention
+3. **UFold Spatial Injection (FiLM)** — 保留 UFold 条件的空间细节
+4. **Physics-Aware Loss** — 训练时加入 stacking continuity + non-crossing loss
+5. **Strict Projection** — 回归 v1 的 greedy max-matching（修复 v2 的 relaxed projection gap）
+6. **更深网络**: 9 层 (vs v1 的 6 层)，更大 hidden_dim 256 (vs v1 的 192)
+7. **合理 Batch Size** — 中等 batch (L=80→48, L=160→24)，确保充分训练步数

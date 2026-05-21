@@ -7,19 +7,28 @@
 ## Quick Overview
 
 ```
-RNA sequence → [RNA-FM + UFold conditioners] → SE-DiT predicts P(pair) 
-             → τ-leap CTMC sampling (20 steps) → projection → contact map
+RNA sequence → [RNA-FM + UFold conditioners] → DA-SE-DiT predicts P(pair)
+             → τ-leap CTMC sampling (20 steps) → strict projection → contact map
 ```
 
-**Key innovations:**
+**Key innovations (v3, current):**
 1. **Bernoulli Discrete Flow Matching** on symmetric matrices (not Gaussian diffusion)
-2. **Symmetry-Equivariant Axial DiT** — strict (i,j)↔(j,i) equivariance via shared QKV
-3. **Inference-time Physics Guidance** — controllable pseudoknot trade-off
-4. **pos_weight ≈ 199** — directly solves 99.5% negative sample imbalance
+2. **Dilated Axial SE-DiT (DA-SE-DiT)** — 9-layer flat backbone with alternating dilation (1/2/4) for multi-scale long-range dependencies without resolution loss
+3. **UFold Spatial Injection (FiLM)** — Feature-wise Linear Modulation preserving spatial conditioning details
+4. **Physics-Aware Training Loss** — stacking continuity + non-crossing penalties during training
+5. **Strict Greedy Projection** — consistent train/inference projection (lesson from v2's failure)
 
 ---
 
 ## Results
+
+### Version History
+
+| Version | Architecture | Status | Val F1 (bpRNA VL0) | Notes |
+|:-------:|:------------|:------:|:-------------------:|:------|
+| **v3** | DA-SE-DiT (9L flat, dilation 1/2/4) | **Training (epoch 56/80)** | **0.575** ↑ | Still improving, no plateau |
+| v1 | SEDiT (6L flat) | Completed | 0.644 | Baseline, solid |
+| v2 | MSEDiT (3+2+3 U-shape) | ❌ Failed | 0.296 | Collapsed: relaxed projection gap |
 
 ### SymFold v1 vs RNADiffFold (8 benchmarks, single sample, no physics guidance)
 
@@ -35,6 +44,19 @@ RNA sequence → [RNA-FM + UFold conditioners] → SE-DiT predicts P(pair)
 | PDB_TS_hard | 28 | OOD-hardest | **0.596** | 0.526 | +0.070 |
 
 **Average F1: 0.735 vs 0.657 (+11.8%)**. With 1/8 parameters (13M vs 109M) and 10× faster inference.
+
+### v3 Training Progress (ongoing)
+
+v3 val F1 is steadily climbing with no signs of plateau:
+
+| Epoch | Train Loss | Val F1 | Val Precision | Val Recall |
+|:-----:|:----------:|:------:|:-------------:|:----------:|
+| 1 | 0.044 | 0.432 | 0.340 | 0.648 |
+| 19 | 0.011 | 0.511 | 0.423 | 0.703 |
+| 39 | 0.006 | 0.552 | 0.468 | 0.726 |
+| 55 | 0.005 | **0.575** | 0.497 | 0.730 |
+
+*Full test-set evaluation will be done once v3 training completes (80 epochs).*
 
 ---
 
@@ -111,16 +133,21 @@ symfold/
 ├── .gitignore
 │
 ├── src/                   # All source code
-│   ├── v1/                # v1: SEDiT (6-layer flat, greedy projection)
+│   ├── v1/                # v1: SEDiT (6-layer flat, greedy projection) — baseline
 │   │   ├── README.md
 │   │   ├── model.py       #   SymFoldModel
 │   │   ├── se_dit.py      #   Symmetry-Equivariant Axial DiT
 │   │   └── discrete_flow.py
-│   ├── v2/                # v2: MSEDiT (U-shape 3+2+3, relaxed projection)
+│   ├── v2/                # v2: MSEDiT (U-shape 3+2+3) — deprecated
 │   │   ├── README.md
 │   │   ├── model.py       #   SymFoldModel_v2
 │   │   ├── ms_se_dit.py   #   Multi-Scale Axial DiT
 │   │   └── discrete_flow.py
+│   ├── v3/                # ★ v3: DA-SE-DiT (9-layer dilated axial) — current
+│   │   ├── README.md
+│   │   ├── model.py       #   SymFoldModel_v3
+│   │   ├── da_se_dit.py   #   Dilated Axial SE-DiT
+│   │   └── discrete_flow.py  # Strict projection + Physics loss
 │   ├── data.py            # Shared: Dataset / BucketBatchSampler
 │   ├── gpu_features.py    # Shared: GPU 17-channel FCN features
 │   ├── physics_energy.py  # Shared: Physics guidance (WC + stacking + PK)
@@ -132,7 +159,8 @@ symfold/
 ├── train/                 # Training scripts
 │   ├── config/            #   JSON configs
 │   ├── train.py           #   v1 trainer
-│   └── train_v2.py        #   v2 trainer
+│   ├── train_v2.py        #   v2 trainer (deprecated)
+│   └── train_v3.py        #   ★ v3 trainer (current)
 │
 ├── eval/                  # Evaluation
 │   └── eval.py            #   Multi-dataset eval (supports --detailed)
@@ -140,6 +168,7 @@ symfold/
 ├── scripts/               # Shell scripts
 │   ├── run_train.sh
 │   ├── run_train_v2.sh
+│   ├── run_train_v3.sh    #   ★ v3 training launcher
 │   └── run_eval.sh
 │
 ├── doc/                   # Documentation & reports
@@ -159,11 +188,13 @@ symfold/
 ```bash
 cd symfold
 
-# v1 (original, ~13M params, ~20min/epoch on H20)
-python -u train/train.py train/config/train_config.json
+# v3 (current, ~21.8M trainable params, ~18min/epoch on H20)
+python -u train/train_v3.py train/config/train_config_v3.json
+# or use the launch script:
+bash scripts/run_train_v3.sh
 
-# v2 (multi-scale, ~15M params)
-python -u train/train_v2.py train/config/train_config_v2.json
+# v1 (baseline, ~13M params, ~20min/epoch on H20)
+python -u train/train.py train/config/train_config.json
 ```
 
 Training outputs (saved to `output/<task_name>/`):
@@ -196,10 +227,10 @@ python eval/eval.py \
 
 ```python
 import torch
-from src.v1.model import SymFoldModel
+from src.v3.model import SymFoldModel_v3
 
-model = SymFoldModel().cuda()
-ckpt = torch.load('model/<task>/best.pt', map_location='cuda')
+model = SymFoldModel_v3().cuda()
+ckpt = torch.load('model/260520-v3-train/best.pt', map_location='cuda')
 model.load_state_dict(ckpt['model'])
 model.eval()
 
@@ -223,7 +254,22 @@ p_t(X_ij = 1 | X_1) = (1-t) · ρ_0 + t · 1[X_1,ij = 1]
 - Training: pos-weighted BCE with time weighting `w(t) = 1/(1-t(1-ρ₀))`
 - Sampling: τ-leap CTMC with closed-form rates
 
-### Architecture (v1: SEDiT)
+### Architecture (v3: DA-SE-DiT, current)
+
+```
+Input (48ch) → PatchEmbed(4) → [DilatedAxialAttn + FFN + AdaLN] ×9 → UnPatch → logit
+                                 dilation: [1,1,1, 2,2,2, 4,4,4]
+```
+
+Key improvements over v1:
+- **Dilated Axial Attention**: alternating dilation rates (1/2/4) capture multi-scale dependencies without downsampling — avoids v2's U-Net symmetry-breaking issue
+- **Cross-Resolution Attention**: global compressed attention inserted every 3 layers
+- **UFold FiLM Injection**: Feature-wise Linear Modulation preserves spatial conditioning details from UFold
+- **Physics-Aware Loss**: stacking continuity + non-crossing penalties during training
+- **Strict Projection**: greedy max-matching (same as v1), ensuring train/inference consistency
+- 9 layers, hidden_dim=256, 4 heads, dim_head=64 (backbone: 13.2M params, total trainable: 21.8M)
+
+### Architecture (v1: SEDiT, baseline)
 
 ```
 Input (48ch) → PatchEmbed(4) → [AxialAttn + FFN + AdaLN] ×6 → UnPatch → logit
@@ -233,7 +279,7 @@ Input (48ch) → PatchEmbed(4) → [AxialAttn + FFN + AdaLN] ×6 → UnPatch →
 - AdaLN-Zero conditioning on time + RNA-FM global + UFold global
 - pos_weight = (1-ρ₀)/ρ₀ ≈ 199
 
-### Architecture (v2: MSEDiT)
+### Architecture (v2: MSEDiT, deprecated)
 
 ```
 Input → PatchEmbed → Encoder(×3) → Downsample2× → Middle(×2) → Upsample2× → Skip+Decoder(×3) → logit

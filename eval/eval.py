@@ -35,6 +35,7 @@ for p in (SYMFOLD_ROOT, SYMFOLD_SRC,
         sys.path.insert(0, p)
 
 from src.v1.model import SymFoldModel
+from src.v3.model import SymFoldModel_v3
 from src.data import (SimpleRNADataset, BucketBatchSampler,
                        build_index, simple_collate_fn)
 from src.gpu_features import get_data_fcn_gpu
@@ -59,15 +60,31 @@ def load_model_from_ckpt(ckpt_path, device):
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ck['config']
     mc = cfg['model']
-    model = SymFoldModel(
-        hidden_dim=mc['hidden_dim'], num_heads=mc['num_heads'],
-        dim_head=mc['dim_head'], num_layers=mc['num_layers'],
-        patch_size=mc['patch_size'], cond_dim=mc['cond_dim'],
-        max_len=mc['max_len'], dp_rate=mc.get('dp_rate', 0.0),
-        rho_0=mc['rho_0'], pos_weight_scale=mc['pos_weight_scale'],
-        u_ckpt=mc['u_conditioner_ckpt'],
-        num_families=mc.get('num_families', 0),
-    )
+    version = mc.get('version', 'v1')
+
+    if version == 'v3':
+        model = SymFoldModel_v3(
+            hidden_dim=mc['hidden_dim'], num_heads=mc['num_heads'],
+            dim_head=mc['dim_head'], num_layers=mc['num_layers'],
+            patch_size=mc['patch_size'], cond_dim=mc['cond_dim'],
+            max_len=mc['max_len'], dp_rate=mc.get('dp_rate', 0.0),
+            rho_0=mc['rho_0'], pos_weight_scale=mc['pos_weight_scale'],
+            u_ckpt=mc['u_conditioner_ckpt'],
+            num_families=mc.get('num_families', 0),
+            dilation_pattern=mc.get('dilation_pattern'),
+            stack_weight=mc.get('stack_weight', 0.05),
+            nc_weight=mc.get('nc_weight', 0.02),
+        )
+    else:
+        model = SymFoldModel(
+            hidden_dim=mc['hidden_dim'], num_heads=mc['num_heads'],
+            dim_head=mc['dim_head'], num_layers=mc['num_layers'],
+            patch_size=mc['patch_size'], cond_dim=mc['cond_dim'],
+            max_len=mc['max_len'], dp_rate=mc.get('dp_rate', 0.0),
+            rho_0=mc['rho_0'], pos_weight_scale=mc['pos_weight_scale'],
+            u_ckpt=mc['u_conditioner_ckpt'],
+            num_families=mc.get('num_families', 0),
+        )
     model.load_state_dict(ck['model'])
     model.to(device).eval()
     return model, cfg
