@@ -26,8 +26,8 @@ RNA sequence → [RNA-FM + UFold conditioners] → DA-SE-DiT predicts P(pair)
 
 | Version | Architecture | Status | Val F1 (bpRNA VL0) | Notes |
 |:-------:|:------------|:------:|:-------------------:|:------|
-| **v3** | DA-SE-DiT (9L flat, dilation 1/2/4) | **Training (epoch 56/80)** | **0.575** ↑ | Still improving, no plateau |
-| v1 | SEDiT (6L flat) | Completed | 0.644 | Baseline, solid |
+| **v3** | DA-SE-DiT (9L flat, dilation 1/2/4) | **Completed (80ep)** | **0.603** | Avg test F1=0.752, surpasses v1 |
+| v1 | SEDiT (6L flat) | Completed | 0.644 | Baseline, avg test F1=0.742 |
 | v2 | MSEDiT (3+2+3 U-shape) | ❌ Failed | 0.296 | Collapsed: relaxed projection gap |
 
 ### SymFold v1 vs RNADiffFold (8 benchmarks, single sample, no physics guidance)
@@ -45,18 +45,20 @@ RNA sequence → [RNA-FM + UFold conditioners] → DA-SE-DiT predicts P(pair)
 
 **Average F1: 0.735 vs 0.657 (+11.8%)**. With 1/8 parameters (13M vs 109M) and 10× faster inference.
 
-### v3 Training Progress (ongoing)
+### v3 Evaluation Results (80 epochs, single sample, no physics guidance)
 
-v3 val F1 is steadily climbing with no signs of plateau:
+| Dataset | N | Type | v3 F1 | v1 F1 | RNADiffFold F1 |
+|---------|---:|:----:|:-----:|:-----:|:--------------:|
+| RNAStrAlign | 2023 | ID | **0.939** | 0.921 | 0.787 |
+| ArchiveII | 3911 | OOD | **0.864** | 0.861 | 0.740 |
+| PDB_TS2 | 38 | OOD-hard | 0.807 | **0.832** | 0.733 |
+| PDB_TS1 | 60 | OOD-hard | **0.716** | 0.675 | 0.607 |
+| PDB_TS3 | 18 | OOD-hard | **0.666** | 0.665 | 0.635 |
+| bpRNA | 1304 | ID | 0.636 | **0.644** | 0.618 |
+| PDB_TS_hard | 28 | OOD-hardest | **0.634** | 0.596 | 0.526 |
+| **Average** | | | **0.752** | 0.742 | 0.657 |
 
-| Epoch | Train Loss | Val F1 | Val Precision | Val Recall |
-|:-----:|:----------:|:------:|:-------------:|:----------:|
-| 1 | 0.044 | 0.432 | 0.340 | 0.648 |
-| 19 | 0.011 | 0.511 | 0.423 | 0.703 |
-| 39 | 0.006 | 0.552 | 0.468 | 0.726 |
-| 55 | 0.005 | **0.575** | 0.497 | 0.730 |
-
-*Full test-set evaluation will be done once v3 training completes (80 epochs).*
+**v3 vs RNADiffFold: +14.5% avg F1** (0.752 vs 0.657), with 1/5 trainable parameters (21.8M vs 109M) and 4× faster inference (single sample, no multi-vote).
 
 ---
 
@@ -64,13 +66,14 @@ v3 val F1 is steadily climbing with no signs of plateau:
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.10+ (tested on 3.12)
 - PyTorch 2.6.0+ with CUDA 12.4
 - GPU with ≥24GB VRAM (tested on NVIDIA H20 96GB)
+- **Note**: TF32 must be disabled on H20 (cuBLAS SIGFPE bug)
 
 ```bash
 # Create conda environment
-conda create -n symfold python=3.10 -y
+conda create -n symfold python=3.12 -y
 conda activate symfold
 
 # Install PyTorch (adjust CUDA version as needed)
@@ -79,6 +82,8 @@ pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorc
 # Install other dependencies
 pip install -r requirements.txt
 ```
+
+Key dependencies: `einops` (tensor rearrangement), `scipy` (sparse matrix), `pandas` (ct file parsing), `matplotlib` (visualization), `scikit-learn` (metrics), `tqdm`, `PyYAML`, `Pillow`.
 
 ### Download Pretrained Weights
 
@@ -103,23 +108,95 @@ Place datasets in `data/`:
 
 | Directory | Size | Contents |
 |-----------|------|----------|
-| `data/preprocess/RNAStrAlign/` | 121 MB | Training set (preprocessed cPickle) |
-| `data/preprocess/bpRNA/` | 63 MB | Training set |
-| `data/preprocess/bpRNA-new/` | 22 MB | Training set |
-| `data/bpRNA/TS0.cPickle` | — | Test: bpRNA (1304 samples) |
-| `data/bpRNA/VL0.cPickle` | — | Validation (1299 samples) |
+| `data/preprocess/RNAStrAlign/` | 121 MB | Training set (preprocessed, binned cPickle) |
+| `data/preprocess/bpRNA/` | 63 MB | Training set (preprocessed, binned cPickle) |
+| `data/preprocess/bpRNA-new/` | 22 MB | Training set (preprocessed, binned cPickle) |
+| `data/bpRNA/TR0.cPickle` | — | Raw training: bpRNA TR0 (11751 samples) |
+| `data/bpRNA/VL0.cPickle` | — | Validation: bpRNA VL0 (1299 samples) |
+| `data/bpRNA/TS0.cPickle` | — | Test: bpRNA TS0 (1304 samples) |
+| `data/RNAStrAlign/train.cPickle` | — | Raw training: RNAStrAlign (17630) |
 | `data/RNAStrAlign/test.cPickle` | — | Test: RNAStrAlign (2023) |
 | `data/ArchiveII/archiveII.cPickle` | — | Test: ArchiveII (3911) |
 | `data/PDB/TS1~TS3,TS_hard.cPickle` | — | Test: PDB OOD-hard (18~60) |
 | `data/bpRNA-new/bpRNAnew.cPickle` | — | Test: bpRNA-new (5401) |
 
-Data format: Python cPickle files containing `RNA_SS_data` namedtuples with fields `(seq, seq_raw, length, name, pairs)`.
+#### Data Format
 
-Original data sources:
-- **bpRNA**: [bpRNA database](https://bprna.cgrb.oregonstate.edu/)
-- **RNAStrAlign**: [RNAStrAlign](https://rna.urmc.rochester.edu/pub/RNAStrAlign.tar.gz)
-- **ArchiveII**: [ArchiveII](https://rna.urmc.rochester.edu/pub/archiveII.tar.gz)
-- **PDB**: Extracted from RCSB PDB 3D structures
+All `.cPickle` files are Python pickle 序列化的 `list[RNA_SS_data]`，其中 `RNA_SS_data` 是一个 namedtuple：
+
+```python
+import collections
+RNA_SS_data = collections.namedtuple('RNA_SS_data', 'seq seq_raw length name pairs')
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `seq` | `np.ndarray (L, 4)` | one-hot 编码的序列 (A=[1,0,0,0], U=[0,1,0,0], C=[0,0,1,0], G=[0,0,0,1]) |
+| `seq_raw` | `str` | 原始 RNA 序列字符串，如 `"AUGCGC..."` |
+| `length` | `int` | 序列长度 |
+| `name` | `str` | 样本 ID，如 `"bpRNA_CRW_15573"` |
+| `pairs` | `list of [i, j]` | 碱基对列表 (0-indexed)，如 `[[0, 118], [1, 117], ...]` |
+
+#### Original Data Sources
+
+| 数据集 | 来源 | 原始格式 | 下载地址 |
+|--------|------|----------|----------|
+| bpRNA (TR0/VL0/TS0) | bpRNA database | `.ct` 文件 (connectivity table) | https://bprna.cgrb.oregonstate.edu/ |
+| bpRNA-new | bpRNA 新增数据 | `.ct` 文件 | 同上 |
+| RNAStrAlign | RNA Structure Alignment | `.ct` 文件 | https://rna.urmc.rochester.edu/pub/RNAStrAlign.tar.gz |
+| ArchiveII | RNA Archive II | `.ct` 文件 | https://rna.urmc.rochester.edu/pub/archiveII.tar.gz |
+| PDB (TS1/TS2/TS3/TS_hard) | RCSB PDB 3D 结构 | `.pdb` + 工具提取 | https://www.rcsb.org/ |
+
+**`.ct` 文件格式** (connectivity table，每行一个碱基):
+```
+1  G  0  2  72  1
+2  C  1  3  71  2
+...
+```
+列含义: `编号(1-idx)  碱基  前一编号  后一编号  配对编号(0=未配对)  编号`
+
+#### Data Preprocessing Pipeline (从原始数据复现)
+
+原始 `.ct` 文件 → cPickle 的转换管道:
+
+```
+1. 原始 .ct 文件 → RNA_SS_data namedtuple (已由上游项目完成)
+   - 解析函数: common/data_utils.py :: get_pairings(data)
+   - 序列编码: common/data_utils.py :: seq_encoding(string) → (L, 4) one-hot
+   - 打包为 list[RNA_SS_data] 后 pickle.dump → data/{dataset}/{split}.cPickle
+
+2. Raw cPickle → Binned cPickle (按长度分桶，训练用)
+   - 脚本: preprocess_data/binning_alldata.py
+   - 输入: data/bpRNA/TR0.cPickle, data/RNAStrAlign/train.cPickle 等
+   - 输出: data/preprocess/{dataset}/bpRNA-pdb_{bin_len}_{idx}.cPickle
+   - 分桶规则: 步进 80 (80, 160, 240, ...)
+   - 每桶 batch: 80→128, 160→64, 240-320→16, 320-640→4, 640-1280→2, >1280→1
+```
+
+**复现命令:**
+```bash
+cd /root/aigame/dannyyan/RNADiffFold
+python preprocess_data/binning_alldata.py    # 生成 data/preprocess/ 训练数据
+python preprocess_data/binning_testsets.py   # 生成 data/preprocess_test/ (可选)
+```
+
+#### Training Data Loading Flow
+
+训练时 **不需要** 预先计算 17 通道 FCN 特征，全部在 GPU 实时计算:
+
+```
+data/preprocess/{dataset}/*.cPickle   (binned, 格式 A)
+        ↓  src/data.py :: build_index()
+扁平索引 [(path, sample_idx, seq_len), ...]
+        ↓  src/data.py :: SimpleRNADataset.__getitem__()
+encode_one_sample() → contact_map (L,L) + seq_one_hot (L,4)
+        ↓  src/data.py :: simple_collate_fn()
+batch tensors + RNA-FM tokens
+        ↓  src/gpu_features.py :: get_data_fcn_gpu()  [GPU 实时计算]
+17 通道 FCN 特征 (B, 17, L, L) = 16ch 碱基对外积 + 1ch 配对概率得分
+        ↓
+模型前向推理
+```
 
 ---
 

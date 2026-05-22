@@ -1,0 +1,78 @@
+{
+  "project_name": "symfold",
+  "task_name": "260522-v4-train",
+  "seed": 2026,
+  "device": "cuda:0",
+
+  "model": {
+    "version": "v4",
+    "hidden_dim": 256,
+    "num_heads": 4,
+    "dim_head": 64,
+    "num_layers": 9,
+    "patch_size": 4,
+    "cond_dim": 8,
+    "max_len": 640,
+    "dp_rate": 0.1,
+    "rho_0": 0.005,
+    "pos_weight_base": 199.0,
+    "pos_weight_min": 50.0,
+    "focal_gamma": 1.0,
+    "u_conditioner_ckpt": "ufold_train_alldata.pt",
+    "num_families": 0,
+    "dilation_pattern": [1, 1, 1, 2, 2, 2, 4, 4, 4],
+    "stack_weight": 0.05,
+    "nc_weight": 0.02,
+    "density_weight": 0.1,
+    "tri_start_layer": 6,
+    "tri_dim": 64,
+    "fm_multi_out_dim": 16
+  },
+
+  "training": {
+    "epochs": 120,
+    "lr": 8e-5,
+    "warmup_epochs": 5,
+    "eval_every": 2,
+    "save_every": 5,
+    "save_every_step": 500,
+    "patience": 30,
+    "num_workers": 0,
+    "pin_memory": false,
+    "dataset": "all",
+    "grad_clip": 1.0,
+    "vis_samples": 5,
+    "auto_resume": true,
+    "log_every": 20,
+    "heartbeat_every": 10,
+    "cpu_threads": 4,
+    "max_set_len": 640,
+    "bucket_batch_size": {
+      "80": 40,
+      "160": 20,
+      "240": 8,
+      "320": 5,
+      "400": 3,
+      "480": 2,
+      "560": 1,
+      "640": 1
+    }
+  },
+
+  "sampling": {
+    "num_steps": 20,
+    "num_samples_per_input": 1,
+    "physics_beta": 0.0,
+    "physics_lambda_pk": 0.0,
+    "physics_alpha_stack": 1.0
+  },
+
+  "paths": {
+    "rnadifffold_root": "/root/aigame/dannyyan/RNADiffFold",
+    "data_root": "/root/aigame/dannyyan/RNADiffFold/data",
+    "preprocess_root": "/root/aigame/dannyyan/RNADiffFold/data/preprocess",
+    "model_save_dir": "model/260522-v4-train",
+    "log_dir": "logs",
+    "output_dir": "output/260522-v4-train"
+  }
+}

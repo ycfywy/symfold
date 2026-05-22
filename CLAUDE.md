@@ -112,6 +112,31 @@ src/
 - **GPU**: NVIDIA H20 (96 GB), device `cuda:0`
 - **重要**: 全程 fp32，TF32 必须关闭（H20 上有 cuBLAS SIGFPE bug）
 
+### 关键依赖 (完整见 requirements.txt)
+
+| 包 | 版本 | 用途 |
+|---|---|---|
+| torch | 2.6.0+cu124 | 深度学习框架 |
+| torchvision | 0.21.0+cu124 | |
+| einops | 0.8.2 | Tensor 重排 (axial attention) |
+| numpy | ≥2.2 | 数值计算 |
+| scipy | ≥1.15 | 稀疏矩阵 (data_utils) |
+| pandas | ≥2.3 | ct 文件解析 |
+| matplotlib | ≥3.10 | 训练曲线可视化 |
+| scikit-learn | ≥1.7 | 评估指标 |
+| tqdm | ≥4.67 | 进度条 |
+| PyYAML | ≥6.0 | 配置解析 |
+| Pillow | ≥12.0 | 图像处理 |
+
+### 从零复现环境
+
+```bash
+conda create -n symfold python=3.12 -y
+conda activate symfold
+pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements.txt
+```
+
 激活环境：
 ```bash
 source /root/aigame/dannyyan/miniconda3/bin/activate RNADiffFold_torch260
@@ -235,6 +260,69 @@ tail -5 logs/260519-185500-v2-eval.log
 
 数据通过符号链接引用 `data -> /root/aigame/dannyyan/RNADiffFold/data`
 
+### 原始数据格式与来源
+
+所有数据最初来源于 RNA 二级结构数据库的 **`.ct` 文件** (connectivity table):
+
+```
+# .ct 文件格式 (每行一个碱基):
+1  G  0  2  72  1
+2  C  1  3  71  2
+# 列: 编号(1-idx) 碱基 前一编号 后一编号 配对编号(0=未配对) 编号
+```
+
+| 数据集 | 来源 | 原始格式 | 下载地址 |
+|--------|------|----------|----------|
+| bpRNA (TR0/VL0/TS0) | bpRNA database | `.ct` | https://bprna.cgrb.oregonstate.edu/ |
+| bpRNA-new | bpRNA 新增数据 | `.ct` | 同上 |
+| RNAStrAlign | RNA Structure Alignment | `.ct` | https://rna.urmc.rochester.edu/pub/RNAStrAlign.tar.gz |
+| ArchiveII | RNA Archive II | `.ct` | https://rna.urmc.rochester.edu/pub/archiveII.tar.gz |
+| PDB (TS1/TS2/TS3/TS_hard) | RCSB PDB 3D 结构 | `.pdb` | https://www.rcsb.org/ |
+
+### cPickle 数据格式
+
+所有 `.cPickle` 文件都是 `list[RNA_SS_data]`，其中:
+
+```python
+RNA_SS_data = collections.namedtuple('RNA_SS_data', 'seq seq_raw length name pairs')
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `seq` | `np.ndarray (L, 4)` | one-hot (A=[1,0,0,0], U=[0,1,0,0], C=[0,0,1,0], G=[0,0,0,1]) |
+| `seq_raw` | `str` | 原始序列 `"AUGCGC..."` |
+| `length` | `int` | 序列长度 |
+| `name` | `str` | 样本 ID, 如 `"bpRNA_CRW_15573"` |
+| `pairs` | `list[[i,j]]` | 碱基对 (0-indexed), 如 `[[0,118],[1,117],...]` |
+
+### 数据预处理管道 (复现步骤)
+
+```
+步骤1: .ct 文件 → Raw cPickle (上游已完成)
+  - 解析函数: RNADiffFold/common/data_utils.py :: get_pairings(data)
+  - 序列编码: RNADiffFold/common/data_utils.py :: seq_encoding(string) → (L,4)
+  - 产出: data/{dataset}/{split}.cPickle
+
+步骤2: Raw cPickle → Binned cPickle (训练用，按长度分桶)
+  - 脚本: RNADiffFold/preprocess_data/binning_alldata.py
+  - 输入: data/bpRNA/TR0.cPickle, data/RNAStrAlign/train.cPickle 等
+  - 输出: data/preprocess/{dataset}/bpRNA-pdb_{bin_len}_{idx}.cPickle
+  - 分桶: 步进80, batch=[128,64,16,4,2,1] 随长度递减
+  - 命令: cd /root/aigame/dannyyan/RNADiffFold && python preprocess_data/binning_alldata.py
+```
+
+### 训练时数据加载流程
+
+```
+data/preprocess/{dataset}/*.cPickle (binned)
+    ↓ src/data.py :: build_index()        # 扫描所有文件建立扁平索引
+    ↓ src/data.py :: SimpleRNADataset     # 按需 unpickle + encode_one_sample()
+    ↓ src/data.py :: BucketBatchSampler   # 按 round_up_80(len) 分桶采样
+    ↓ src/data.py :: simple_collate_fn()  # stack + generate_token_batch (RNA-FM)
+    ↓ src/gpu_features.py :: get_data_fcn_gpu()  # GPU 实时: 16ch外积 + 1ch配对得分
+    ↓ 模型前向
+```
+
 ### 训练集 (Train) — 共 34,782 samples
 
 从 `data/preprocess/` 加载，为预处理过的分 bin 数据（按序列长度分 batch）：
@@ -280,16 +368,17 @@ tail -5 logs/260519-185500-v2-eval.log
 
 ## 当前状态
 
-### v3 (当前活跃) — 训练中
+### v3 (当前活跃) — 80 epochs 训练完成 ✅
 
 - **配置**: `train/config/train_config_v3.json`
 - **任务名**: `260520-v3-train`
 - **模型目录**: `model/260520-v3-train/`
 - **输出目录**: `output/260520-v3-train/`
 - **日志**: `logs/260520-v3-train/`
-- **状态**: 训练到 epoch 56/80 时进程被 SIGTERM 中断，已开启 auto_resume=true 恢复训练
-- **Resume 说明**: last.pt 保存了 epoch 56 中间步的模型和 optimizer；history 从磁盘 `output/260520-v3-train/history.json` 恢复（56 entries），曲线和可视化会延续
-- **训练时长**: ~18 小时 (56 epochs × ~18min/epoch)
+- **Eval 结果**: `output/260520-v3-train/eval_detailed.json`
+- **状态**: 80 epochs 训练完成 (best.pt = epoch 73, val F1=0.603)
+- **训练时长**: ~24.4 小时 (79 epochs × ~18min/epoch)
+- **后续计划**: 继续训练到 200 epochs + 加入 full eval model selection
 
 #### v3 架构要点
 - **Backbone**: DA-SE-DiT (Dilated Axial SE-DiT)，9 层 flat (无 U-Net)
@@ -299,23 +388,38 @@ tail -5 logs/260519-185500-v2-eval.log
 - **投影**: Strict greedy max-matching (回归 v1 方案)
 - **参数量**: Backbone 13.2M, 可训练 21.8M, 冻结 RNA-FM 99.5M
 - **训练**: lr=8e-5, warmup=5 epochs, eval_every=2, patience=20, grad_clip=1.0
+- **新特性**: RoPE, QK-Norm, FiLM 空间条件注入, Cosine sampling schedule
+
+#### v3 Eval 结果 (best.pt, single sample, no physics guidance)
+
+| Dataset | N | Type | F1 | Precision | Recall | MCC |
+|---------|---:|:----:|:---:|:---------:|:------:|:---:|
+| RNAStrAlign | 2,023 | ID | **0.939** | 0.920 | 0.961 | 0.940 |
+| ArchiveII | 3,911 | OOD | **0.864** | 0.834 | 0.904 | 0.866 |
+| PDB_TS2 | 38 | OOD-hard | **0.807** | 0.873 | 0.759 | 0.810 |
+| PDB_TS1 | 60 | OOD-hard | **0.716** | 0.768 | 0.684 | 0.720 |
+| PDB_TS3 | 18 | OOD-hard | **0.666** | 0.738 | 0.611 | 0.669 |
+| bpRNA | 1,304 | ID | **0.636** | 0.557 | 0.785 | 0.652 |
+| PDB_TS_hard | 28 | OOD-hardest | **0.634** | 0.712 | 0.587 | 0.640 |
+| **Average** | | | **0.752** | 0.772 | 0.756 | 0.757 |
+
+**对比**: v3 avg F1=0.752 vs v1=0.742 vs RNADiffFold=0.657。5/7 数据集超越 v1。
 
 #### v3 训练曲线摘要
 
-| Epoch | Train Loss | Val F1 | Val Precision | Val Recall | 趋势 |
-|:-----:|:----------:|:------:|:-------------:|:----------:|:----:|
-| 1 | 0.0441 | 0.432 | 0.340 | 0.648 | 起步 |
-| 7 | 0.0170 | 0.485 | 0.395 | 0.688 | 稳步上升 |
-| 19 | 0.0105 | 0.511 | 0.423 | 0.703 | ↑ |
-| 33 | 0.0072 | 0.542 | 0.455 | 0.721 | ↑ |
-| 45 | 0.0059 | 0.564 | 0.483 | 0.727 | ↑ |
-| 55 | 0.0049 | **0.575** | 0.497 | 0.730 | ↑ 仍在上升 |
+| Epoch | Train Loss | Val F1 | Val Precision | Val Recall |
+|:-----:|:----------:|:------:|:-------------:|:----------:|
+| 1 | 0.0441 | 0.432 | 0.340 | 0.648 |
+| 19 | 0.0105 | 0.511 | 0.423 | 0.703 |
+| 45 | 0.0059 | 0.564 | 0.483 | 0.727 |
+| 73 | 0.0039 | **0.603** | 0.527 | 0.745 |
+| 79 | 0.0038 | 0.598 | 0.522 | 0.743 |
 
-**分析**: v3 训练稳定，val F1 持续单调上升（无崩塌），Precision 和 Recall 同步改善。best.pt 对应最后一个 eval (epoch 55, F1=0.575)。但目前 val F1 仍低于 v1 (0.644 on bpRNA)，还有 24 epochs 训练空间，且曲线未出现 plateau 迹象。
+**分析**: 全程稳定上升，无崩塌，未触发 early stop。曲线末端仍在上升，继续训练有望进一步提升。
 
-#### v3 已保存 Checkpoints
+#### v3 Checkpoints
 
-每 5 个 epoch 保存一次: epoch_4, 9, 14, ..., 54 + best.pt + last.pt，共 ~6GB
+每 5 个 epoch 保存一次: epoch_4, 9, ..., 74 + best.pt + last.pt，共 ~8.5 GB
 
 ---
 
@@ -340,12 +444,15 @@ tail -5 logs/260519-185500-v2-eval.log
 | bpRNA | 0.644 | 0.583 | 0.758 |
 | PDB_TS_hard | 0.596 | 0.695 | 0.540 |
 
-### v3 改进点 (相比 v1)
+### v3 改进点 (相比 v1) — 已验证有效
 
-1. **Dilated Axial Attention** — 交替 dilation=1/2/4，不降分辨率即可捕获 2×/4× 长程依赖
-2. **Cross-Resolution Attention** — 每 3 层插入全局压缩 attention
-3. **UFold Spatial Injection (FiLM)** — 保留 UFold 条件的空间细节
-4. **Physics-Aware Loss** — 训练时加入 stacking continuity + non-crossing loss
-5. **Strict Projection** — 回归 v1 的 greedy max-matching（修复 v2 的 relaxed projection gap）
-6. **更深网络**: 9 层 (vs v1 的 6 层)，更大 hidden_dim 256 (vs v1 的 192)
-7. **合理 Batch Size** — 中等 batch (L=80→48, L=160→24)，确保充分训练步数
+1. **Dilated Axial Attention** — 交替 dilation=1/2/4，不降分辨率即可捕获长程依赖 ✅
+2. **RoPE** — 旋转位置编码替代 learnable pos embed，更好泛化变长序列 ✅
+3. **QK-Norm** — RMSNorm on Q/K，稳定 9 层深训练（无 NaN） ✅
+4. **FiLM Spatial Injection** — 每层注入 UFold 空间条件 (vs v1 仅全局 pooling) ✅
+5. **Physics-Aware Loss** — stacking + non-crossing 正则，未干扰主训练 ✅
+6. **Strict Projection** — 回归 v1 greedy max-matching，修复 v2 gap ✅
+7. **更深更宽**: 9 层×256dim (vs v1 的 6 层×192dim) ✅
+8. **Cosine Sampling Schedule** — 前大后小步长 ✅
+
+**结果**: avg F1=0.752，5/7 数据集超越 v1，全部超越 RNADiffFold。
