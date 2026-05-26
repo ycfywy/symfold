@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-SymFold v4 训练入口
+SymFold v5 训练入口
 
-基于 v3 trainer，改动:
-- 使用 SymFoldModel_v4 (Multi-Layer FM + Triangle Update + Adaptive Loss)
-- Loss dict 新增 density 分项
-- 支持 v4 特有配置 (fm_multi_out_dim, tri_start_layer, tri_dim, focal_gamma,
-  pos_weight_base, pos_weight_min, density_weight)
+基于 v4 trainer，改动:
+- 使用 SymFoldModel_v5 (Wider FM + Density Conditioning + Output Refine)
+- 默认配置: train_config_v5.json
 
 用法:
     cd /root/aigame/dannyyan/RNADiffFold/symfold
-    python -u train/train_v4.py train/config/train_config_v4.json
+    python -u train/train_v5.py train/config/train_config_v5.json
 """
 from __future__ import annotations
 
@@ -43,12 +41,25 @@ for p in (SYMFOLD_ROOT, SYMFOLD_SRC,
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from src.v4.model import SymFoldModel_v4
+from src.v5.model import SymFoldModel_v5
 from src.data import (SimpleRNADataset, BucketBatchSampler,
                        build_index, simple_collate_fn)
 from src.gpu_features import get_data_fcn_gpu
 from common.data_utils import contact_map_masks
 from common.loss_utils import rna_evaluation
+
+
+# 完整评估集：训练中每隔 N 个 epoch 跑一次，用于追踪泛化表现
+FULL_EVAL_SET_FILES = {
+    'bpRNA':        ['data/bpRNA/TS0.cPickle'],
+    'RNAStrAlign':  ['data/RNAStrAlign/test.cPickle'],
+    'bpRNA-new':    ['data/bpRNA-new/bpRNAnew.cPickle'],
+    'ArchiveII':    ['data/ArchiveII/archiveII.cPickle'],
+    'PDB_TS1':      ['data/PDB/TS1.cPickle'],
+    'PDB_TS2':      ['data/PDB/TS2.cPickle'],
+    'PDB_TS3':      ['data/PDB/TS3.cPickle'],
+    'PDB_TS_hard':  ['data/PDB/TS_hard.cPickle'],
+}
 
 
 # ============================================================
@@ -97,7 +108,7 @@ def setup_logging(config):
             logging.FileHandler(log_file, mode='a'),
             logging.StreamHandler(sys.stdout),
         ])
-    return logging.getLogger('SymFold-v4')
+    return logging.getLogger('SymFold-v5')
 
 
 def load_config(path):
@@ -222,25 +233,32 @@ def visualize(gt, pred, seq_len, name, epoch, metrics, save_path):
 
 def plot_curves(history, output_dir):
     try:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        epochs = [h['epoch'] for h in history]
+        fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+        epochs = [h['epoch'] + 1 for h in history]
         losses = [h['loss'] for h in history]
         axes[0].plot(epochs, losses, 'b-')
         axes[0].set_title('Train Loss')
         axes[0].set_xlabel('Epoch')
 
-        eval_e = [h['epoch'] for h in history if 'val_f1' in h]
+        eval_e = [h['epoch'] + 1 for h in history if 'val_f1' in h]
         eval_f1 = [h['val_f1'] for h in history if 'val_f1' in h]
         if eval_f1:
             axes[1].plot(eval_e, eval_f1, 'g-o')
             axes[1].set_title(f'Val F1 (best={max(eval_f1):.4f})')
         axes[1].set_xlabel('Epoch')
 
+        full_e = [h['epoch'] + 1 for h in history if 'full_eval_avg_f1' in h]
+        full_f1 = [h['full_eval_avg_f1'] for h in history if 'full_eval_avg_f1' in h]
+        if full_f1:
+            axes[2].plot(full_e, full_f1, 'm-o')
+            axes[2].set_title(f'Full Eval Avg F1 (best={max(full_f1):.4f})')
+        axes[2].set_xlabel('Epoch')
+
         times = [h.get('time_s', 0) for h in history]
         if any(t > 0 for t in times):
-            axes[2].plot(epochs, times, 'r-')
-            axes[2].set_title('Epoch Time (s)')
-        axes[2].set_xlabel('Epoch')
+            axes[3].plot(epochs, times, 'r-')
+            axes[3].set_title('Epoch Time (s)')
+        axes[3].set_xlabel('Epoch')
 
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'curves.png'), dpi=100)
@@ -420,11 +438,270 @@ def evaluate(model, loader, device, config, logger, epoch, output_dir):
 
 
 # ============================================================
+# 完整 Eval + 报告
+# ============================================================
+
+def _resolve_eval_files(files, config):
+    root = config['paths'].get('rnadifffold_root', os.path.dirname(SYMFOLD_ROOT))
+    out = []
+    for f in files:
+        out.append(f if os.path.isabs(f) else os.path.join(root, f))
+    return out
+
+
+@torch.no_grad()
+def evaluate_full_dataset(model, dataset_name, files, device, config, logger,
+                          epoch, eval_dir, alphabet):
+    """评估一个完整测试集，保存少量 GT/Pred 可视化。"""
+    roots = _resolve_eval_files(files, config)
+    idx = build_index(roots, verbose=False)
+    if not idx:
+        logger.warning(f'[FullEval] {dataset_name}: no samples found: {roots}')
+        return None
+
+    scfg = config['sampling']
+    tcfg = config['training']
+    bs_table = {int(k): int(v) for k, v in tcfg.get('full_eval_bucket_batch_size',
+        {"80": 8, "160": 4, "240": 2, "320": 1, "400": 1, "480": 1, "560": 1, "640": 1}).items()}
+    sampler = BucketBatchSampler(idx, batch_size_table=bs_table, shuffle=False,
+                                 max_set_len=tcfg.get('max_set_len', 640), seed=0)
+    collate = partial(simple_collate_fn, alphabet=alphabet)
+    loader = DataLoader(SimpleRNADataset(idx), batch_sampler=sampler,
+                        collate_fn=collate, num_workers=0,
+                        pin_memory=tcfg.get('pin_memory', False))
+
+    vis_dir = os.path.join(eval_dir, 'vis')
+    os.makedirs(vis_dir, exist_ok=True)
+    max_vis = tcfg.get('full_eval_vis_samples_per_set', 3)
+    vis_cnt = 0
+    all_metrics = []
+    samples = []
+    t0 = time.time()
+    logger.info(f'[FullEval] {dataset_name}: start N={len(idx)} batches={len(loader)}')
+
+    for bi, batch in enumerate(loader):
+        try:
+            contact = batch['contact']
+            seq_oh = batch['seq_oh'].to(device)
+            seq_enc = batch['seq_enc'].to(device)
+            tokens = batch['tokens'].to(device)
+            length = batch['length'].to(device)
+            set_max_len = int(batch['set_max_len'])
+            data_fcn_2 = get_data_fcn_gpu(seq_oh, set_max_len)
+            matrix_rep = torch.zeros_like(contact)
+            contact_masks = contact_map_masks(length, matrix_rep).to(device)
+            pred, _ = model.sample(
+                data_fcn_2=data_fcn_2, tokens=tokens,
+                contact_masks=contact_masks, set_max_len=set_max_len,
+                seq_oh=seq_enc,
+                num_steps=scfg.get('num_steps', 20),
+                num_samples_per_input=scfg.get('num_samples_per_input', 1),
+                physics_beta=scfg.get('physics_beta', 0.0),
+                physics_lambda_pk=scfg.get('physics_lambda_pk', 0.0),
+                physics_alpha_stack=scfg.get('physics_alpha_stack', 1.0),
+                density_guided=scfg.get('density_guided', True),
+            )
+            pred = pred.cpu().float()
+            for i in range(contact.shape[0]):
+                m = rna_evaluation(pred[i].squeeze(), contact.float()[i].squeeze())
+                all_metrics.append(m)
+                acc, prec, rec, sens, spec, f1, mcc = [float(x) for x in m]
+                seq_len = int(length[i].item())
+                gt_pairs = int((contact.float()[i].squeeze()[:seq_len, :seq_len] > 0.5).sum().item()) // 2
+                pred_pairs = int((pred[i].squeeze()[:seq_len, :seq_len] > 0.5).sum().item()) // 2
+                samples.append({
+                    'name': batch['names'][i], 'length': seq_len,
+                    'f1': f1, 'precision': prec, 'recall': rec, 'mcc': mcc,
+                    'gt_num_pairs': gt_pairs, 'pred_num_pairs': pred_pairs,
+                })
+                if vis_cnt < max_vis:
+                    safe_name = batch['names'][i].replace('/', '_')
+                    vp = os.path.join(vis_dir, f'e{epoch+1:03d}_{dataset_name}_{safe_name}.png')
+                    visualize(contact.float()[i].squeeze().numpy(),
+                              pred[i].squeeze().numpy(), seq_len,
+                              f'{dataset_name}/{safe_name}', epoch + 1, m, vp)
+                    vis_cnt += 1
+            if bi % 20 == 0:
+                logger.info(f'[FullEval] {dataset_name} b{bi}/{len(loader)} L={set_max_len}')
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                logger.warning(f'[FullEval OOM] {dataset_name} b{bi} skip')
+                torch.cuda.empty_cache()
+                continue
+            raise
+
+    if not all_metrics:
+        return None
+    arr = np.array(all_metrics)
+    acc, prec, rec, sens, spec, f1, mcc = [np.nan_to_num(arr[:, i]).mean() for i in range(7)]
+    samples.sort(key=lambda x: x['f1'])
+    res = {
+        'N': len(all_metrics),
+        'F1': float(f1), 'Precision': float(prec), 'Recall': float(rec),
+        'MCC': float(mcc), 'Accuracy': float(acc), 'Specificity': float(spec),
+        'top_worst': samples[:10],
+        'top_best': list(reversed(samples[-10:])),
+    }
+    logger.info(f'[FullEval] {dataset_name}: F1={f1:.4f} P={prec:.4f} R={rec:.4f} '
+                f'MCC={mcc:.4f} N={len(all_metrics)} time={time.time()-t0:.1f}s')
+    return res
+
+
+def plot_full_eval_bar(results, save_path, epoch):
+    names = list(results.keys())
+    f1s = [results[n]['F1'] for n in names]
+    plt.figure(figsize=(12, 5))
+    bars = plt.bar(names, f1s, color='#4C78A8')
+    plt.ylim(0, 1)
+    plt.ylabel('F1')
+    plt.title(f'Full Eval F1 @ Epoch {epoch}')
+    plt.xticks(rotation=30, ha='right')
+    for b, v in zip(bars, f1s):
+        plt.text(b.get_x() + b.get_width() / 2, v + 0.01, f'{v:.3f}',
+                 ha='center', va='bottom', fontsize=8)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120)
+    plt.close()
+
+
+def plot_full_eval_trend(summary_path, save_path):
+    if not os.path.isfile(summary_path):
+        return
+    with open(summary_path, 'r') as f:
+        hist = json.load(f)
+    if not hist:
+        return
+    datasets = sorted({k for h in hist for k in h.get('results', {}).keys()})
+    plt.figure(figsize=(12, 6))
+    for ds in datasets:
+        xs, ys = [], []
+        for h in hist:
+            if ds in h.get('results', {}):
+                xs.append(h['epoch'])
+                ys.append(h['results'][ds]['F1'])
+        if ys:
+            plt.plot(xs, ys, marker='o', label=ds)
+    avg_x = [h['epoch'] for h in hist]
+    avg_y = [h.get('avg_f1', 0) for h in hist]
+    plt.plot(avg_x, avg_y, marker='s', linewidth=3, color='black', label='Average')
+    plt.ylim(0, 1)
+    plt.xlabel('Epoch')
+    plt.ylabel('F1')
+    plt.title('Full Eval F1 Trend')
+    plt.legend(ncol=2, fontsize=8)
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120)
+    plt.close()
+
+
+def write_full_eval_report(results, out_path, epoch, config, avg_f1):
+    lines = []
+    lines.append(f'# SymFold v5 Full Eval Report — Epoch {epoch}')
+    lines.append('')
+    lines.append(f'- 时间: {time.asctime()}')
+    lines.append(f'- checkpoint: `{config["paths"]["model_save_dir"]}/last.pt`')
+    lines.append(f'- sampling steps: `{config["sampling"].get("num_steps", 20)}`')
+    lines.append(f'- density_guided: `{config["sampling"].get("density_guided", True)}`')
+    lines.append(f'- Average F1: **{avg_f1:.4f}**')
+    lines.append('')
+    lines.append('## 数据集汇总')
+    lines.append('')
+    lines.append('| Dataset | N | F1 | Precision | Recall | MCC |')
+    lines.append('|---------|---:|:--:|:---------:|:------:|:---:|')
+    for name, r in sorted(results.items(), key=lambda kv: kv[1]['F1'], reverse=True):
+        lines.append(f'| {name} | {r["N"]} | **{r["F1"]:.4f}** | {r["Precision"]:.4f} | {r["Recall"]:.4f} | {r["MCC"]:.4f} |')
+    lines.append('')
+    lines.append('## 最差样本 Top-5')
+    for name, r in results.items():
+        lines.append('')
+        lines.append(f'### {name}')
+        lines.append('| Sample | L | F1 | P | R | GT pairs | Pred pairs |')
+        lines.append('|--------|--:|:--:|:--:|:--:|---------:|-----------:|')
+        for s in r.get('top_worst', [])[:5]:
+            lines.append(f'| `{s["name"]}` | {s["length"]} | {s["f1"]:.4f} | {s["precision"]:.4f} | {s["recall"]:.4f} | {s["gt_num_pairs"]} | {s["pred_num_pairs"]} |')
+    lines.append('')
+    lines.append('## 可视化文件')
+    lines.append('')
+    lines.append(f'- 本轮柱状图: `full_eval_f1_bar_e{epoch:03d}.png`')
+    lines.append('- 趋势曲线: `../full_eval_f1_trend.png`')
+    lines.append('- 样本可视化: `vis/e{epoch:03d}_*.png`')
+    with open(out_path, 'w') as f:
+        f.write('\n'.join(lines))
+
+
+@torch.no_grad()
+def run_full_eval(model, device, config, logger, epoch, output_dir, alphabet):
+    tcfg = config['training']
+    enabled = tcfg.get('full_eval_enabled', True)
+    if not enabled:
+        return None
+    epoch_num = epoch + 1
+    eval_root = os.path.join(output_dir, 'full_eval')
+    eval_dir = os.path.join(eval_root, f'e{epoch_num:03d}')
+    os.makedirs(eval_dir, exist_ok=True)
+
+    selected = tcfg.get('full_eval_sets')
+    if selected:
+        names = [x.strip() for x in selected.split(',') if x.strip()]
+    else:
+        names = list(FULL_EVAL_SET_FILES.keys())
+
+    was_training = model.training
+    model.eval()
+    results = {}
+    logger.info(f'[FullEval] ===== epoch {epoch_num} full eval start: {names} =====')
+    t0 = time.time()
+    for name in names:
+        if name not in FULL_EVAL_SET_FILES:
+            logger.warning(f'[FullEval] skip unknown dataset: {name}')
+            continue
+        res = evaluate_full_dataset(model, name, FULL_EVAL_SET_FILES[name],
+                                    device, config, logger, epoch, eval_dir, alphabet)
+        if res is not None:
+            results[name] = res
+
+    if was_training:
+        model.train()
+    if not results:
+        return None
+
+    avg_f1 = float(np.mean([r['F1'] for r in results.values()]))
+    out_json = os.path.join(eval_dir, f'full_eval_e{epoch_num:03d}.json')
+    with open(out_json, 'w') as f:
+        json.dump({'epoch': epoch_num, 'avg_f1': avg_f1, 'results': results}, f, indent=2)
+
+    plot_full_eval_bar(results, os.path.join(eval_dir, f'full_eval_f1_bar_e{epoch_num:03d}.png'), epoch_num)
+    report_path = os.path.join(eval_dir, f'FULL_EVAL_REPORT_e{epoch_num:03d}.md')
+    write_full_eval_report(results, report_path, epoch_num, config, avg_f1)
+
+    summary_path = os.path.join(eval_root, 'full_eval_history.json')
+    hist = []
+    if os.path.isfile(summary_path):
+        try:
+            with open(summary_path, 'r') as f:
+                hist = json.load(f)
+        except Exception:
+            hist = []
+    hist = [h for h in hist if h.get('epoch') != epoch_num]
+    hist.append({'epoch': epoch_num, 'avg_f1': avg_f1,
+                 'results': {k: {'F1': v['F1'], 'N': v['N']} for k, v in results.items()}})
+    hist.sort(key=lambda x: x['epoch'])
+    with open(summary_path, 'w') as f:
+        json.dump(hist, f, indent=2)
+    plot_full_eval_trend(summary_path, os.path.join(eval_root, 'full_eval_f1_trend.png'))
+
+    logger.info(f'[FullEval] ===== epoch {epoch_num} done avg_f1={avg_f1:.4f} '
+                f'time={time.time()-t0:.1f}s report={report_path} =====')
+    return {'avg_f1': avg_f1, 'results': results, 'report': report_path}
+
+
+# ============================================================
 # main
 # ============================================================
 
 def main():
-    cfg_path = os.path.join(TRAIN_DIR, 'config', 'train_config_v4.json')
+    cfg_path = os.path.join(TRAIN_DIR, 'config', 'train_config_v5.json')
     if len(sys.argv) > 1:
         cfg_path = sys.argv[1]
     config = load_config(cfg_path)
@@ -444,7 +721,7 @@ def main():
                                       'pid': os.getpid()})
 
     logger.info('=' * 70)
-    logger.info(f'SymFold v4 Training: {task}')
+    logger.info(f'SymFold v5 Training: {task}')
     logger.info(f'PID={os.getpid()} PGID={os.getpgrp()} py={sys.version.split()[0]}')
     logger.info(f'Torch={torch.__version__} CUDA={torch.version.cuda}')
     logger.info(f'config:\n{json.dumps(config, indent=2)}')
@@ -467,27 +744,27 @@ def main():
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    logger.info('[Init] building v4 model on CPU...')
+    logger.info('[Init] building v5 model on CPU...')
     t0 = time.time()
     mc = config['model']
-    model = SymFoldModel_v4(
+    model = SymFoldModel_v5(
         hidden_dim=mc['hidden_dim'], num_heads=mc['num_heads'],
         dim_head=mc['dim_head'], num_layers=mc['num_layers'],
         patch_size=mc['patch_size'], cond_dim=mc['cond_dim'],
         max_len=mc['max_len'], dp_rate=mc['dp_rate'],
         rho_0=mc['rho_0'],
         pos_weight_base=mc.get('pos_weight_base', 199.0),
-        pos_weight_min=mc.get('pos_weight_min', 50.0),
-        focal_gamma=mc.get('focal_gamma', 1.0),
+        pos_weight_min=mc.get('pos_weight_min', 20.0),
+        focal_gamma=mc.get('focal_gamma', 1.5),
         u_ckpt=mc['u_conditioner_ckpt'],
         num_families=mc.get('num_families', 0),
         dilation_pattern=mc.get('dilation_pattern'),
         stack_weight=mc.get('stack_weight', 0.05),
         nc_weight=mc.get('nc_weight', 0.02),
-        density_weight=mc.get('density_weight', 0.1),
+        density_weight=mc.get('density_weight', 0.2),
         tri_start_layer=mc.get('tri_start_layer', 6),
         tri_dim=mc.get('tri_dim', 64),
-        fm_multi_out_dim=mc.get('fm_multi_out_dim', 16),
+        fm_multi_out_dim=mc.get('fm_multi_out_dim', 64),
     )
     logger.info(f'[Init] built in {time.time()-t0:.1f}s')
     total = sum(p.numel() for p in model.parameters())
@@ -538,6 +815,7 @@ def main():
 
     tcfg = config['training']
     eval_every = tcfg.get('eval_every', 2)
+    full_eval_every = tcfg.get('full_eval_every', 20)
     save_every = tcfg.get('save_every', 5)
     patience = tcfg.get('patience', 30)
     patience_cnt = 0
@@ -575,6 +853,15 @@ def main():
                 'history': history,
                 'config': config,
             }, last_ckpt)
+
+            if full_eval_every and (epoch + 1) % full_eval_every == 0:
+                full_res = run_full_eval(model, device, config, logger,
+                                         epoch, output_dir, alphabet)
+                if full_res:
+                    h_entry['full_eval_avg_f1'] = full_res['avg_f1']
+                    for ds_name, ds_res in full_res['results'].items():
+                        h_entry[f'full_eval_{ds_name}_f1'] = ds_res['F1']
+                    h_entry['full_eval_report'] = full_res['report']
 
             if (epoch + 1) % eval_every == 0:
                 res = evaluate(model, val_loader, device, config, logger,

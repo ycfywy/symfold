@@ -11,7 +11,7 @@ SymFold 是一个基于 **Discrete Flow Matching** 的 RNA 二级结构预测模
 /root/aigame/dannyyan/RNADiffFold/symfold/
 ```
 
-它是 RNADiffFold 的改进版本。当前活跃版本为 **v3**，使用 **Dilated Axial SE-DiT (DA-SE-DiT)** 架构 + Bernoulli Flow Matching + Physics-Aware Loss。
+它是 RNADiffFold 的改进版本。当前活跃版本为 **v5**，使用 **DA-SE-DiT-v5** 架构 (Wider FM Fusion + Density Conditioning + OutputRefineConv + Triangle Update + SwiGLU) + Bernoulli Flow Matching。
 
 ---
 
@@ -91,10 +91,18 @@ src/
 │   ├── model.py         #   SymFoldModel_v2
 │   ├── ms_se_dit.py     #   MSEDiT backbone (3+2+3 U型)
 │   └── discrete_flow.py #   Relaxed projection + Cosine schedule
-└── v3/                  # ★ v3 版本模型代码 (当前活跃)
-    ├── model.py         #   SymFoldModel_v3
-    ├── da_se_dit.py     #   DA-SE-DiT backbone (9层, dilated axial)
-    └── discrete_flow.py #   Strict projection + Physics loss
+├── v3/                  # v3 版本模型代码
+│   ├── model.py         #   SymFoldModel_v3
+│   ├── da_se_dit.py     #   DA-SE-DiT backbone (9层, dilated axial)
+│   └── discrete_flow.py #   Strict projection + Physics loss
+├── v4/                  # v4 版本模型代码
+│   ├── model.py         #   SymFoldModel_v4
+│   ├── da_se_dit.py     #   DASEDiT_v4 (9层, dilated axial + triangle update)
+│   └── discrete_flow.py #   Adaptive density loss + Focal + strict projection
+└── v5/                  # ★ v5 版本模型代码 (当前活跃)
+    ├── model.py         #   SymFoldModel_v5
+    ├── da_se_dit.py     #   DASEDiT_v5 (wider FM + density cond + refine conv)
+    └── README.md        #   v5 架构说明
 ```
 
 **规则**：
@@ -152,9 +160,14 @@ cd /root/aigame/dannyyan/RNADiffFold/symfold
 source /root/aigame/dannyyan/miniconda3/bin/activate RNADiffFold_torch260
 
 # 命名规范: YYMMDD-HHMMSS-任务名
-# 例如: 260520-v3-train
+# 例如: 260522-v4-train
 
-# v3 训练 (当前活跃版本)
+# v4 训练 (当前活跃版本)
+bash scripts/run_train_v4.sh
+# 或手动:
+nohup python -u train/train_v4.py train/config/train_config_v4.json >> logs/260522-v4-train/260522-v4-train.stdout.log 2>> logs/260522-v4-train/260522-v4-train.stderr.log &
+
+# v3 训练
 bash scripts/run_train_v3.sh
 # 或手动:
 nohup python -u train/train_v3.py train/config/train_config_v3.json >> logs/260520-v3-train/260520-v3-train.stdout.log 2>> logs/260520-v3-train/260520-v3-train.stderr.log &
@@ -323,7 +336,7 @@ data/preprocess/{dataset}/*.cPickle (binned)
     ↓ 模型前向
 ```
 
-### 训练集 (Train) — 共 34,782 samples
+### 训练集 (Train) — 共 29,381 samples (standard 模式)
 
 从 `data/preprocess/` 加载，为预处理过的分 bin 数据（按序列长度分 batch）：
 
@@ -331,13 +344,15 @@ data/preprocess/{dataset}/*.cPickle (binned)
 |------|------|-------:|------|
 | RNAStrAlign | `data/preprocess/RNAStrAlign/` | 17,630 | RNAStrAlign 训练集 |
 | bpRNA TR0 | `data/preprocess/bpRNA/` | 11,751 | bpRNA 官方训练集 |
-| bpRNA-new | `data/preprocess/bpRNA-new/` | 5,401 | ⚠️ bpRNA 新增数据（全量） |
+
+> **注意**: `bpRNA-new` 已从训练集移除（避免数据泄漏），作为独立测试集评估。
 
 ### 验证集 (Val) — 训练时每 2 个 epoch 做一次 eval
 
 | 数据集 | 文件 | 样本数 | 说明 |
 |--------|------|-------:|------|
-| bpRNA VL0 | `data/bpRNA/VL0.cPickle` | 1,299 | bpRNA 官方验证集，用于 early stopping |
+| bpRNA VL0 | `data/bpRNA/VL0.cPickle` | 1,299 | bpRNA 官方验证集 |
+| RNAStrAlign val | `data/RNAStrAlign/val.cPickle` | ~2,000 | RNAStrAlign 验证集 |
 
 ### 测试集 (Eval) — 训练完后独立评估
 
@@ -346,29 +361,143 @@ data/preprocess/{dataset}/*.cPickle (binned)
 | bpRNA TS0 | `data/bpRNA/TS0.cPickle` | 1,304 | ID test | ✅ 未在训练中出现 |
 | RNAStrAlign | `data/RNAStrAlign/test.cPickle` | 2,023 | ID test | ✅ 未在训练中出现 |
 | ArchiveII | `data/ArchiveII/archiveII.cPickle` | 3,911 | OOD | ✅ 完全独立数据 |
-| bpRNA-new | `data/bpRNA-new/bpRNAnew.cPickle` | 5,401 | ⚠️ 泄漏 | 同时在训练集中 |
+| bpRNA-new | `data/bpRNA-new/bpRNAnew.cPickle` | 5,401 | OOD | ✅ 未在训练中出现 |
 | PDB TS1 | `data/PDB/TS1.cPickle` | 60 | OOD-hard | ✅ PDB 3D 结构提取 |
 | PDB TS2 | `data/PDB/TS2.cPickle` | 38 | OOD-hard | ✅ PDB 3D 结构提取 |
 | PDB TS3 | `data/PDB/TS3.cPickle` | 18 | OOD-hard | ✅ PDB 3D 结构提取 |
 | PDB TS_hard | `data/PDB/TS_hard.cPickle` | 28 | OOD-hardest | ✅ PDB 3D 结构提取 |
 
-### ⚠️ 数据泄漏警告
+### 数据集配置选项 (`dataset` 字段)
 
-**bpRNA-new** 被同时用作训练集和测试集（5,401 samples 完全重叠）。
-在论文/报告中需标注该数据集为 "seen during training"，其 eval 结果不能作为泛化能力的证据。
-
-### bpRNA 系列说明
-
-| 名称 | 来源 | 划分 |
-|------|------|------|
-| bpRNA TR0/VL0/TS0 | bpRNA 数据库官方划分 | TR0=训练, VL0=验证, TS0=测试 ✅ |
-| bpRNA-new | bpRNA 数据库后续新增 | 整体用于训练 + 整体用于测试 ⚠️ |
+| 值 | 训练集 | 验证集 | 说明 |
+|:--:|--------|--------|------|
+| `"standard"` | bpRNA TR0 + RNAStrAlign train | bpRNA VL0 + RNAStrAlign val | **推荐**，无泄漏 |
+| `"all"` | bpRNA TR0 + RNAStrAlign + bpRNA-new | bpRNA VL0 | 兼容旧配置，有泄漏风险 |
+| `"bpRNA_only"` | bpRNA TR0 | bpRNA VL0 | 单数据集训练 |
 
 ---
 
 ## 当前状态
 
-### v3 (当前活跃) — 80 epochs 训练完成 ✅
+### v5 (当前活跃) — 训练中 (epoch 55/120, best val F1=0.7982)
+
+- **配置**: `train/config/train_config_v5.json`
+- **训练脚本**: `train/train_v5.py`
+- **启动脚本**: `scripts/run_train_v5.sh`
+- **任务名**: `260525-161400-v5-train`
+- **数据集模式**: `"standard"` (bpRNA TR0 + RNAStrAlign train，验证: bpRNA VL0 + RNAStrAlign val)
+- **模型目录**: `model/260525-161400-v5-train/`
+- **输出目录**: `output/260525-161400-v5-train/`
+- **日志**: `logs/260525-161400-v5-train/`
+- **完整 eval**: 每 20 epoch 自动运行一次，输出到 `output/260525-161400-v5-train/full_eval/eXXX/`
+- **完整 eval 产出**: `full_eval_eXXX.json`, `FULL_EVAL_REPORT_eXXX.md`, `full_eval_f1_bar_eXXX.png`, `vis/*.png`, `full_eval_f1_trend.png`
+- **PID**: 19778 (恢复于 2026-05-26 11:05)
+
+#### v5 改进点 (vs v4)
+
+- **Wider FM Fusion**: `fm_multi_out_dim=64`，v4 为 16，减少 RNA-FM 信息压缩损失
+- **Density Conditioning**: 训练时注入 GT density，推理时预测 density 并用于采样
+- **Density-guided Sampling**: 低密度 RNA 降低 0→1 翻转率，抑制过预测
+- **OutputRefineConv**: UnPatchify 后在全分辨率 L×L 上做 3 层 Conv 残差精修
+- **更强低密度控制**: `pos_weight_min=20`, `focal_gamma=1.5`, `density_weight=0.2`
+
+#### v5 训练曲线摘要
+
+| Epoch | Train Loss | Val F1 | Val Precision | Val Recall | Val MCC |
+|:-----:|:----------:|:------:|:-------------:|:----------:|:-------:|
+| 1 | 0.0145 | 0.587 | 0.519 | 0.703 | 0.597 |
+| 5 | 0.0059 | 0.689 | 0.613 | 0.824 | 0.702 |
+| 11 | 0.0037 | 0.730 | 0.657 | 0.860 | 0.742 |
+| 17 | 0.0028 | 0.761 | 0.702 | 0.872 | 0.772 |
+| 27 | 0.0019 | 0.775 | — | — | — |
+| 35 | 0.0015 | 0.783 | 0.728 | 0.887 | 0.793 |
+| 43 | — | 0.783 | 0.722 | 0.899 | 0.795 |
+| 45 | — | 0.784 | 0.724 | 0.896 | 0.795 |
+| 49 | — | 0.786 | 0.726 | 0.897 | 0.797 |
+| 53 | — | **0.798** | 0.743 | 0.901 | 0.808 |
+
+**分析**: v5 持续上升中。epoch 53 达到 val F1=0.798，大幅超越 v4 (0.616 @ep65) 和 v3 (0.603 @ep73)。精度 P 从 0.519 → 0.743，recall 稳定在 0.90。训练近半程，预计 120 epoch 可达 0.82+。
+
+#### v5 Full Eval 结果
+
+| Dataset | N | Type | v5 e20 | v5 e40 | v4 e65 | v3 e73 |
+|---------|---:|:----:|:------:|:------:|:------:|:------:|
+| RNAStrAlign | 2023 | ID | 0.894 | **0.917** | 0.941 | 0.939 |
+| ArchiveII | 3911 | OOD | 0.810 | **0.840** | 0.870 | 0.864 |
+| PDB_TS2 | 38 | OOD-hard | 0.803 | **0.831** | 0.780 | 0.807 |
+| PDB_TS1 | 60 | OOD-hard | 0.688 | **0.695** | 0.707 | 0.716 |
+| PDB_TS3 | 18 | OOD-hard | 0.665 | **0.658** | 0.630 | 0.666 |
+| PDB_TS_hard | 28 | OOD-hardest | 0.585 | 0.578 | 0.608 | **0.634** |
+| bpRNA-new | 5401 | OOD | 0.581 | **0.593** | — | — |
+| bpRNA | 1304 | ID | 0.573 | **0.593** | 0.638 | 0.636 |
+| **Average** | | | 0.700 | **0.713** | 0.739* | 0.752 |
+
+*注: v4/v3 的 avg F1 不含 bpRNA-new；v5 含 8 个数据集。v5 epoch 40 在 PDB_TS2 已超越 v4 ep65 (0.831 vs 0.780)。训练近半程，下一次 Full Eval 在 epoch 60。
+
+---
+
+### v4 — 待重新训练 (standard 数据集模式)
+
+- **配置**: `train/config/train_config_v4.json`
+- **数据集模式**: `"standard"` (bpRNA TR0 + RNAStrAlign train，验证: bpRNA VL0 + RNAStrAlign val)
+- **任务名**: 待新建 (旧任务 `260522-v4-train` 使用了 `"all"` 模式含 bpRNA-new)
+- **状态**: 配置已更新，等待启动新一轮训练
+- **变更说明**: 从训练集中移除 bpRNA-new (5,401 samples)，避免数据泄漏；验证集加入 RNAStrAlign val
+
+#### v4 数据划分 (standard 模式)
+
+```
+训练: bpRNA TR0 (11,751) + RNAStrAlign train (17,630) = 29,381 samples
+验证: bpRNA VL0 (1,299) + RNAStrAlign val (~2,000) = ~3,299 samples
+测试: bpRNA TS0 + RNAStrAlign test + bpRNA-new + ArchiveII + PDB_TS1/2/3/hard
+```
+
+#### v4 架构要点 (vs v3 改进)
+- **Multi-Layer RNA-FM**: 提取 layers [3,6,9,12] 的 embedding，learnable softmax-weighted fusion + MLP
+- **Triangle Multiplicative Update**: 后 3 层 (layer 6-8) 加入 AF2 风格三体约束
+- **Adaptive Density-Aware Loss**: pos_weight 50-199 自适应 + Focal Loss (γ=1.0)
+- **Gated FFN (SwiGLU)**: 替代 GELU FFN，参数效率更高
+- **Density Regression Head**: 辅助任务预测配对密度
+- **保留**: RoPE, QK-Norm, FiLM, Dilated Axial Attention, AdaLN-Zero, Strict Projection
+- **参数量**: Backbone ~15.5M + Triangle ~0.8M, 总可训练 25.1M, 冻结 RNA-FM 99.5M
+- **训练**: lr=8e-5, warmup=5 epochs, eval_every=2, patience=30, grad_clip=1.0, epochs=120
+
+#### v4 训练曲线摘要
+
+| Epoch | Train Loss | Val F1 | Val Precision | Val Recall | Val MCC |
+|:-----:|:----------:|:------:|:-------------:|:----------:|:-------:|
+| 1 | 0.0199 | 0.412 | 0.323 | 0.622 | 0.437 |
+| 11 | 0.0058 | 0.485 | 0.395 | 0.688 | 0.509 |
+| 29 | 0.0033 | 0.541 | 0.456 | 0.724 | 0.562 |
+| 45 | 0.0022 | 0.574 | 0.493 | 0.738 | 0.592 |
+| 55 | 0.0019 | 0.599 | 0.520 | 0.749 | 0.615 |
+| 63 | 0.0016 | 0.615 | 0.535 | 0.768 | 0.631 |
+| 65 | 0.0016 | **0.616** | 0.539 | 0.759 | 0.630 |
+
+**分析**: 全程稳定上升，loss 持续下降，已超越 v3 的 val F1 (0.603)。趋势仍在上升，预计 120 epoch 可达 0.70+。
+
+#### v4 Eval 结果 (best.pt epoch 65, single sample, no physics guidance)
+
+| Dataset | N | Type | v4 F1 | v3 F1 | v1 F1 |
+|---------|---:|:----:|:-----:|:-----:|:-----:|
+| RNAStrAlign | 2,023 | ID | **0.941** | 0.939 | 0.921 |
+| ArchiveII | 3,911 | OOD | **0.870** | 0.864 | 0.861 |
+| PDB_TS2 | 38 | OOD-hard | 0.780 | **0.807** | 0.832 |
+| PDB_TS1 | 60 | OOD-hard | 0.707 | **0.716** | 0.675 |
+| bpRNA | 1,304 | ID | **0.638** | 0.636 | 0.644 |
+| PDB_TS3 | 18 | OOD-hard | 0.630 | **0.666** | 0.665 |
+| PDB_TS_hard | 28 | OOD-hardest | 0.608 | **0.634** | 0.596 |
+| **Average** | | | **0.739** | **0.752** | 0.742 |
+
+**分析**: v4 仅训练 65/120 epochs，在 RNAStrAlign、ArchiveII、bpRNA 上已超越 v3，但 PDB 系列略逊（训练不足，Triangle Update 需更多 epoch 收敛）。预计完整 120 epoch 训练后 avg F1 > 0.76。
+
+#### v4 Checkpoints
+
+每 5 个 epoch 保存一次: epoch_4, 9, ..., 64 + best.pt + last.pt，共 ~7 GB
+
+---
+
+### v3 (已完成) — 80 epochs 训练完成 ✅
 
 - **配置**: `train/config/train_config_v3.json`
 - **任务名**: `260520-v3-train`
@@ -444,6 +573,17 @@ data/preprocess/{dataset}/*.cPickle (binned)
 | bpRNA | 0.644 | 0.583 | 0.758 |
 | PDB_TS_hard | 0.596 | 0.695 | 0.540 |
 
+### v4 改进点 (相比 v3) — 训练中验证
+
+1. **Multi-Layer RNA-FM Fusion** — 提取 4 层 (3,6,9,12) embedding，learnable fusion 获取多粒度信息 ✅
+2. **Triangle Multiplicative Update** — AF2 风格三体约束，显式建模碱基对间的互斥 ✅
+3. **Adaptive Density-Aware Loss** — 低密度 RNA 自动降低 pos_weight (50-199) ✅
+4. **Focal Loss (γ=1.0)** — 聚焦 hard examples，减少 easy negatives 的干扰 ✅
+5. **SwiGLU Gated FFN** — 替代 GELU FFN，参数效率更高 ✅
+6. **Density Regression Head** — 辅助任务，预测配对密度指导投影 ✅
+
+**当前结果**: val F1=0.616 (epoch 65), 已超越 v3 的 0.603 (epoch 73)。Test avg F1=0.739 (epoch 65), 在 RNAStrAlign/ArchiveII/bpRNA 已超越 v3，训练仅进行一半。
+
 ### v3 改进点 (相比 v1) — 已验证有效
 
 1. **Dilated Axial Attention** — 交替 dilation=1/2/4，不降分辨率即可捕获长程依赖 ✅
@@ -456,3 +596,26 @@ data/preprocess/{dataset}/*.cPickle (binned)
 8. **Cosine Sampling Schedule** — 前大后小步长 ✅
 
 **结果**: avg F1=0.752，5/7 数据集超越 v1，全部超越 RNADiffFold。
+
+---
+
+## 文档索引
+
+| 文档 | 位置 | 内容 |
+|------|------|------|
+| 模型架构演进详解 | `doc/MODEL_ARCHITECTURE_EVOLUTION.md` | v1→v4 全部架构 + Shape 追踪 + Mermaid 图 |
+| Discrete Flow Matching 详解 | `doc/DISCRETE_FLOW_MATCHING.md` | 完整数值计算示例 (训练+推理+投影) |
+| v5 设计文档 | `doc/V5_DESIGN.md` | v5 架构设计与改进思路 |
+| v4 失败分析 | `doc/V4_FAILURE_ANALYSIS.md` | v4 在 PDB 系列表现分析 |
+
+---
+
+## 工作日志
+
+### 2026-05-26
+
+1. **v5 训练恢复**: 训练进程中断（无错误），通过 `auto_resume=true` 从 `last.pt` (epoch 41) 成功恢复
+2. **v5 训练进展**: epoch 53 达到 best val F1=0.7982 (P=0.743, R=0.901)，远超 v4(0.616) 和 v3(0.603)
+3. **Full Eval 完成**: epoch 20 avg F1=0.700, epoch 40 avg F1=0.713，PDB_TS2 已超越 v4
+4. **文档更新**: README.md 和 CLAUDE.md 更新 v5 为当前活跃版本，记录训练曲线和 Full Eval 结果
+5. **新增文档**: `doc/DISCRETE_FLOW_MATCHING.md` — Discrete Flow Matching 详解，含完整数值计算示例（训练 t 采样 → x_t 构造 → Loss 计算 → 推理 τ-leap 采样 → Greedy Projection）

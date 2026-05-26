@@ -36,6 +36,8 @@ for p in (SYMFOLD_ROOT, SYMFOLD_SRC,
 
 from src.v1.model import SymFoldModel
 from src.v3.model import SymFoldModel_v3
+from src.v4.model import SymFoldModel_v4
+from src.v5.model import SymFoldModel_v5
 from src.data import (SimpleRNADataset, BucketBatchSampler,
                        build_index, simple_collate_fn)
 from src.gpu_features import get_data_fcn_gpu
@@ -45,6 +47,10 @@ from common.loss_utils import rna_evaluation
 
 # 测试集文件映射
 TEST_SET_FILES = {
+    # === 验证集 (训练时用于 early stopping，非训练数据) ===
+    'bpRNA_VL0':    ['data/bpRNA/VL0.cPickle'],
+    'RNAStrAlign_val': ['data/RNAStrAlign/val.cPickle'],
+    # === 测试集 (完全独立，从未参与训练) ===
     'bpRNA':        ['data/bpRNA/TS0.cPickle'],
     'RNAStrAlign':  ['data/RNAStrAlign/test.cPickle'],
     'bpRNA-new':    ['data/bpRNA-new/bpRNAnew.cPickle'],
@@ -62,7 +68,47 @@ def load_model_from_ckpt(ckpt_path, device):
     mc = cfg['model']
     version = mc.get('version', 'v1')
 
-    if version == 'v3':
+    if version == 'v5':
+        model = SymFoldModel_v5(
+            hidden_dim=mc['hidden_dim'], num_heads=mc['num_heads'],
+            dim_head=mc['dim_head'], num_layers=mc['num_layers'],
+            patch_size=mc['patch_size'], cond_dim=mc.get('cond_dim', 8),
+            max_len=mc['max_len'], dp_rate=mc.get('dp_rate', 0.1),
+            rho_0=mc['rho_0'],
+            pos_weight_base=mc.get('pos_weight_base', 199.0),
+            pos_weight_min=mc.get('pos_weight_min', 20.0),
+            focal_gamma=mc.get('focal_gamma', 1.5),
+            u_ckpt=mc['u_conditioner_ckpt'],
+            num_families=mc.get('num_families', 0),
+            dilation_pattern=mc.get('dilation_pattern'),
+            stack_weight=mc.get('stack_weight', 0.05),
+            nc_weight=mc.get('nc_weight', 0.02),
+            density_weight=mc.get('density_weight', 0.2),
+            tri_start_layer=mc.get('tri_start_layer', 6),
+            tri_dim=mc.get('tri_dim', 64),
+            fm_multi_out_dim=mc.get('fm_multi_out_dim', 64),
+        )
+    elif version == 'v4':
+        model = SymFoldModel_v4(
+            hidden_dim=mc['hidden_dim'], num_heads=mc['num_heads'],
+            dim_head=mc['dim_head'], num_layers=mc['num_layers'],
+            patch_size=mc['patch_size'], cond_dim=mc.get('cond_dim', 8),
+            max_len=mc['max_len'], dp_rate=mc.get('dp_rate', 0.1),
+            rho_0=mc['rho_0'],
+            pos_weight_base=mc.get('pos_weight_base', 199.0),
+            pos_weight_min=mc.get('pos_weight_min', 50.0),
+            focal_gamma=mc.get('focal_gamma', 1.0),
+            u_ckpt=mc['u_conditioner_ckpt'],
+            num_families=mc.get('num_families', 0),
+            dilation_pattern=mc.get('dilation_pattern'),
+            stack_weight=mc.get('stack_weight', 0.05),
+            nc_weight=mc.get('nc_weight', 0.02),
+            density_weight=mc.get('density_weight', 0.1),
+            tri_start_layer=mc.get('tri_start_layer', 6),
+            tri_dim=mc.get('tri_dim', 64),
+            fm_multi_out_dim=mc.get('fm_multi_out_dim', 16),
+        )
+    elif version == 'v3':
         model = SymFoldModel_v3(
             hidden_dim=mc['hidden_dim'], num_heads=mc['num_heads'],
             dim_head=mc['dim_head'], num_layers=mc['num_layers'],
@@ -309,7 +355,7 @@ def print_detailed_report(results: Dict[str, Any]):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ckpt', required=True, help='path to .pt (best/last)')
-    parser.add_argument('--test_sets', default='bpRNA,ArchiveII,PDB_TS1,PDB_TS2,PDB_TS3,PDB_TS_hard',
+    parser.add_argument('--test_sets', default='bpRNA,RNAStrAlign,ArchiveII,PDB_TS1,PDB_TS2,PDB_TS3,PDB_TS_hard',
                          help='comma-separated test set names')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--num_steps', type=int, default=20)

@@ -1,11 +1,11 @@
 {
   "project_name": "symfold",
-  "task_name": "260522-v4-train",
+  "task_name": "260525-161400-v5-train",
   "seed": 2026,
   "device": "cuda:0",
 
   "model": {
-    "version": "v4",
+    "version": "v5",
     "hidden_dim": 256,
     "num_heads": 4,
     "dim_head": 64,
@@ -16,17 +16,17 @@
     "dp_rate": 0.1,
     "rho_0": 0.005,
     "pos_weight_base": 199.0,
-    "pos_weight_min": 50.0,
-    "focal_gamma": 1.0,
+    "pos_weight_min": 20.0,
+    "focal_gamma": 1.5,
     "u_conditioner_ckpt": "ufold_train_alldata.pt",
     "num_families": 0,
     "dilation_pattern": [1, 1, 1, 2, 2, 2, 4, 4, 4],
     "stack_weight": 0.05,
     "nc_weight": 0.02,
-    "density_weight": 0.1,
+    "density_weight": 0.2,
     "tri_start_layer": 6,
     "tri_dim": 64,
-    "fm_multi_out_dim": 16
+    "fm_multi_out_dim": 64
   },
 
   "training": {
@@ -34,6 +34,20 @@
     "lr": 8e-5,
     "warmup_epochs": 5,
     "eval_every": 2,
+    "full_eval_enabled": true,
+    "full_eval_every": 20,
+    "full_eval_sets": "bpRNA,RNAStrAlign,bpRNA-new,ArchiveII,PDB_TS1,PDB_TS2,PDB_TS3,PDB_TS_hard",
+    "full_eval_vis_samples_per_set": 3,
+    "full_eval_bucket_batch_size": {
+      "80": 8,
+      "160": 4,
+      "240": 2,
+      "320": 1,
+      "400": 1,
+      "480": 1,
+      "560": 1,
+      "640": 1
+    },
     "save_every": 5,
     "save_every_step": 500,
     "patience": 30,
@@ -48,11 +62,11 @@
     "cpu_threads": 4,
     "max_set_len": 640,
     "bucket_batch_size": {
-      "80": 40,
-      "160": 20,
-      "240": 8,
-      "320": 5,
-      "400": 3,
+      "80": 32,
+      "160": 16,
+      "240": 6,
+      "320": 4,
+      "400": 2,
       "480": 2,
       "560": 1,
       "640": 1
@@ -64,15 +78,16 @@
     "num_samples_per_input": 1,
     "physics_beta": 0.0,
     "physics_lambda_pk": 0.0,
-    "physics_alpha_stack": 1.0
+    "physics_alpha_stack": 1.0,
+    "density_guided": true
   },
 
   "paths": {
     "rnadifffold_root": "/root/aigame/dannyyan/RNADiffFold",
     "data_root": "/root/aigame/dannyyan/RNADiffFold/data",
     "preprocess_root": "/root/aigame/dannyyan/RNADiffFold/data/preprocess",
-    "model_save_dir": "model/260522-v4-train",
+    "model_save_dir": "model/260525-161400-v5-train",
     "log_dir": "logs",
-    "output_dir": "output/260522-v4-train"
+    "output_dir": "output/260525-161400-v5-train"
   }
 }
